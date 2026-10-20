@@ -1,0 +1,9 @@
+# 排除所有可能的敏感文件
+*.key
+*.pem
+*.p12
+*.dylib
+*.app
+.DS_Store
+node_modules/
+*.log
