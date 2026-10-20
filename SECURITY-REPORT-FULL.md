@@ -2,8 +2,12 @@
 
 > 目标：EduCodePass（东软信息学院「码途」C/C++ 闯关练习客户端）macOS 版
 > 版本：1.3.0（universal: x86_64 + arm64）
-> 性质：授权范围内的安全评估与防护有效性验证
-> 说明：本报告包含完整的绕过实现与工具链代码。文中已对所有个人标识做脱敏处理。
+> 样本 SHA-256：`5a3a07ebae2df12f4ea9676f9675e8547413369f3059c7bae6e27b5341d07b5d`
+> 测试环境：macOS 27.2（26B5112a），arm64，Apple M1 Pro
+> 性质：授权范围内的安全评估
+> 说明：文中已脱敏。每个结论标注验证方式，静态推断均注明局限。
+
+**统计口径**：本报告记录 **8 项当前版本存在的问题**，另附 **1 项历史问题**（V-01，1.3.0 已修复）。
 
 ---
 
@@ -327,7 +331,65 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZQredXRgD1f0iNsCBFe0No9y...   ← 已截断
 
 ---
 
-### 4.8 逆向补充：完整攻击面清单
+
+### 4.8 V-16 IPC ACL 配置不一致
+
+**背景**：页面 JS 里 `window.__TAURI__.core.invoke` 可用。
+
+探测方式：
+
+```js
+var T = window.__TAURI__;
+// 返回 12 个模块：
+// app|core|dpi|event|image|menu|mocks|path|tray|webview|webviewWindow|window
+```
+
+#### 怎么区分「ACL 拒绝」和「参数缺失」
+
+Tauri v2 的执行顺序是先检查 ACL，再做参数反序列化。所以两种错误可以分开：
+
+| 错误类型 | 含义 |
+|---|---|
+| `not allowed by ACL` | 权限拒绝，命令未被授权 |
+| `invalid args xxx` | 权限已通过，只是参数不匹配 |
+
+#### 测试结果
+
+从页面上下文调用，参数传空对象 `{}`：
+
+| 命令 | 返回 | 判定 |
+|---|---|---|
+| `device_id_get` | 返回成功 | ACL 放行 |
+| `device_fingerprint` | 返回成功 | ACL 放行 |
+| `device_pubkey` | 返回成功 | ACL 放行 |
+| `sign_request` | `not allowed by ACL` | **拒绝** |
+| `sign_endorsement` | `invalid args method` | ACL 放行，缺 method |
+| `apply_client_config` | `invalid args blockProcesses` | ACL 放行，缺 blockProcesses |
+| `open_client_window` | `invalid args url` | ACL 放行，缺 url |
+| `sign_set_key` | `invalid args key` | ACL 放行，缺 key |
+
+#### 结论
+
+`sign_request` 被正确限制，页面无法借用客户端签名能力。
+
+但 `sign_set_key`（替换签名密钥）没有被限制。这两个命令的敏感程度同级，权限配置却不同。
+
+#### 未验证的部分
+
+`sign_set_key`、`open_client_window`、`apply_client_config` 只验证到「权限放行 + 参数校验失败」这一步。
+
+没有传入完整参数实际执行，原因：
+
+- `sign_set_key` 会替换设备密钥，可能破坏当前设备登记
+- `open_client_window` 会触发 `multi_open`，这是截图触发分类之一
+- `apply_client_config` 之前验证过改配置不影响检测
+
+所以「能否调用」是证明的，「调用后产生什么效果」没有验证。
+
+
+---
+
+### 4.9 逆向补充：完整攻击面清单
 
 #### IPC 命令面（23 个，含 ACL 配对）
 
@@ -458,7 +520,7 @@ static void patch_window(void) {
 }
 
 // ============ ③ 页面读取 + 编辑器读取 ============
-@interface Bridge : NSObject <WKScriptMessageHandler>
+@interface Bridge : NSObject <WKScriptMessageHandler, NSURLSessionDelegate>
 @end
 @implementation Bridge
 - (void)userContentController:(WKUserContentController *)ucc
@@ -477,13 +539,25 @@ static void patch_window(void) {
     [[self secureSession] dataTaskWithRequest:req].resume;
 }
 
-// 信任本地自签证书（relay 用自签）
+// 信任本地自签证书：必须实现 challenge 回调，delegate:nil 无法通过 TLS 校验
+- (void)URLSession:(NSURLSession *)session
+    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+      completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    if ([challenge.protectionSpace.host isEqualToString:@"127.0.0.1"]) {
+        completionHandler(NSURLSessionAuthChallengeUseCredential,
+                          [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust]);
+    } else {
+        completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+    }
+}
+
 - (NSURLSession *)secureSession {
     static NSURLSession *s;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-        s = [NSURLSession sessionWithConfiguration:cfg delegate:nil delegateQueue:nil];
+        // delegate 必须是 self，否则 challenge 回调不会触发
+        s = [NSURLSession sessionWithConfiguration:cfg delegate:self delegateQueue:nil];
     });
     return s;
 }
@@ -728,11 +802,36 @@ final class Typer {
     // ⚠️ 必须用 privateState：不继承系统修饰键状态
     private static let src = CGEventSource(stateID: .privateState)
 
-    // keycode 映射表（部分）
+    // US 键盘虚拟键码映射（macOS kVK_* 常量）
     private static let map: [Character: (CGKeyCode, Bool)] = [
+        // 小写字母
         "a":(0,false),"s":(1,false),"d":(2,false),"f":(3,false),"h":(4,false),
         "g":(5,false),"z":(6,false),"x":(7,false),"c":(8,false),"v":(9,false),
-        // ... 完整 ASCII 表
+        "b":(11,false),"q":(12,false),"w":(13,false),"e":(14,false),"r":(15,false),
+        "y":(16,false),"t":(17,false),"o":(31,false),"u":(32,false),"i":(34,false),
+        "p":(35,false),"l":(37,false),"j":(38,false),"k":(40,false),
+        "n":(45,false),"m":(46,false),
+        // 大写字母（需 Shift）
+        "A":(0,true),"S":(1,true),"D":(2,true),"F":(3,true),"H":(4,true),
+        "G":(5,true),"Z":(6,true),"X":(7,true),"C":(8,true),"V":(9,true),
+        "B":(11,true),"Q":(12,true),"W":(13,true),"E":(14,true),"R":(15,true),
+        "Y":(16,true),"T":(17,true),"O":(31,true),"U":(32,true),"I":(34,true),
+        "P":(35,true),"L":(37,true),"J":(38,true),"K":(40,true),
+        "N":(45,true),"M":(46,true),
+        // 数字
+        "1":(18,false),"2":(19,false),"3":(20,false),"4":(21,false),"5":(23,false),
+        "6":(22,false),"7":(26,false),"8":(28,false),"9":(25,false),"0":(29,false),
+        // 符号（无需 Shift）
+        "-":(27,false),"=":(24,false),"[" :(33,false),"]":(30,false),
+        "\\":(42,false),";":(41,false),"'":(39,false),",":(43,false),
+        ".":(47,false),"/":(44,false),"`":(50,false),
+        // 符号（需 Shift）
+        "!":(18,true),"@":(19,true),"#":(20,true),"$":(21,true),"%":(23,true),
+        "^":(22,true),"&":(26,true),"*":(28,true),"(":(25,true),")":(29,true),
+        "_":(27,true),"+":(24,true),"{":(33,true),"}":(30,true),
+        "|":(42,true),":":(41,true),"\"":(39,true),"<":(43,true),
+        ">":(47,true),"?":(44,true),"~":(50,true),
+        // 控制字符
         " ":(49,false), "\n":(36,false), "\t":(48,false),
     ]
 
