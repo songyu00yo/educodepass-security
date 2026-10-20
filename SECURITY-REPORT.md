@@ -49,7 +49,6 @@
 | 实测 | 上述字符串在 1.3.0 二进制中**出现次数均为 0** |
 | 影响 | 攻击者可任意 patch 二进制（改字符串、改指令、替换主程序）、注入 dylib，**客户端自身不会察觉** |
 | 复现要点 | ① 将主二进制改名（如 `.real`）；② 放入自定义 shim 以 `DYLD_INSERT_LIBRARIES` 注入；③ 重签名（adhoc 即可）；④ 应用正常运行 |
-| 修复建议 | 启动时对自身 Mach-O 计算哈希并与内嵌/服务端下发值比对；校验 `__TEXT` 段签名；校验加载的 dylib 列表 |
 
 ---
 
@@ -60,7 +59,6 @@
 | 证据 | 客户端 stderr 明确输出：`证书校验挂钩未安装（不影响启动）: 证书错误拦截未在 macOS 上实现（见 README 的「已知差距」第 2 条）` |
 | 相关字段 | `publicKeyHashHex`（存在于二进制，但在 macOS 路径未启用校验） |
 | 影响 | 理论上可对该客户端发起的 HTTPS 请求进行中间人观察/篡改（配合自签 CA） |
-| 修复建议 | 在 macOS 网络栈实现 SPKI pinning；或至少校验服务端证书公钥哈希 |
 
 ---
 
@@ -72,7 +70,6 @@
 | 内置命中示例 | `node`、`Terminal`、`nmap`、`Charles`、`osascript`、`ncat`、`Claude` |
 | 绕过方式 | ① 将二进制内的 `/bin/ps` 字符串改为不存在的路径（如 `/bin/pX`）→ 扫描 exec 失败 → 返回空列表；② 或使用不在名单内的等价工具 |
 | 影响 | 进程黑名单完全失效，且**客户端不会察觉**（无自校验，见 V-02） |
-| 修复建议 | 改用 `libproc` / `sysctl(KERN_PROC)` 直接读进程表（不依赖外部命令）；对检测失败做失败即拒绝策略；名单改为服务端实时校验 |
 
 ---
 
@@ -84,7 +81,6 @@
 | 客户端行为 | 日志：`检测到 DYLD_INSERT_LIBRARIES=...，已清除并记为环境异常` |
 | 绕过方式 | 注入的 dylib 在 `__attribute__((constructor))` 中调用 `unsetenv("DYLD_INSERT_LIBRARIES")`（及 `DYLD_FORCE_FLAT_NAMESPACE` / `DYLD_LIBRARY_PATH`）→ 后续检测读到空值 |
 | 影响 | 注入痕迹被清除，环境异常位不再置位 |
-| 修复建议 | 在进程启动**最早阶段**（`main` 之前、`dyld` 回调）读取并留存一份环境快照；或改为检测 `_dyld_image_count()` 中非白名单镜像；或检测 `LC_LOAD_DYLIB` 异常 |
 
 ---
 
@@ -96,7 +92,6 @@
 | 已知位 | `0x4` 截屏 / `0x20` 进程黑名单 / `0x40` 环境变量 / `0x100` 失焦 / `0x200` 环境篡改 |
 | 绕过方式 | 注入后通过 `method_setImplementation` / 内存写入将对应位清零 |
 | 影响 | 上报的异常位归零 |
-| 修复建议 | 位掩码以只写方式维护（每次读取后立即重算）；增加位掩码的完整性校验（如与独立计数器交叉验证） |
 
 ---
 
@@ -107,7 +102,6 @@
 | 机制 | 调用 `/usr/sbin/screencapture` 抓屏 + `/usr/bin/sips` 处理；触发时机见 §3.4 |
 | 绕过方式 | 监控系统中是否出现 `screencapture` 进程，出现即隐藏作弊窗口，截图完成后恢复 |
 | 影响 | 监考截图拍不到目标窗口 |
-| 修复建议 | **改用 ScreenCaptureKit（`SCStream` / `SCScreenshotManager`）在进程内截图**，不 spawn 子进程 → 无进程名可被监控；同时对截图结果做完整性校验（如要求窗口列表快照与画面一致） |
 | 备注 | 这是目前防护中最容易提升的一项：进程内截图可直接消除该绕过面 |
 
 ---
@@ -119,7 +113,6 @@
 | 机制 | 通过 `resignKeyWindow` / 前端 `blur` 事件判定「切屏」，计入 `envFlags 0x100` 与前端 `focusLostCount` |
 | 绕过方式 | Swizzle `-[NSWindow resignKeyWindow]` 为 no-op（窗口永不 resignKey）+ 拦截前端 `blur` 监听 |
 | 影响 | 切屏行为不再被记录 |
-| 修复建议 | 改用 CGWindowList / ScreenCaptureKit 交叉验证「当前前台窗口是否为考试窗口」；前端计数与服务端心跳时间戳对齐校验 |
 
 ---
 
@@ -141,7 +134,6 @@
 | 格式 | DER PKCS#8，P-256（`prime256v1`），可成功派生对应公钥 |
 | 影响 | **任意本地进程（含恶意软件）可读取该设备私钥**，进而伪造该设备的请求签名，冒充设备身份向服务端发请求 |
 | 攻击成本 | **极低**——一条 `security` 命令即可，无需任何高权限 |
-| 修复建议 | ① 改用 **Secure Enclave** 生成不可导出密钥（`kSecAttrTokenIDSecureEnclave` + `kSecAccessControlBiometryAny`）；② 或至少用 `SecAccessControlCreateWithFlags` + `kSecAccessControlUserPresence`；③ 禁止用 `security` 命令行工具读写私钥 |
 
 > 该问题与 V-01（硬编码工厂私钥）性质相近：**都是私钥泄露**。区别是 V-01 泄露的是所有设备通用的工厂私钥（1.3.0 已修），V-13 泄露的是**每台设备的独立身份私钥**，且**当前版本仍未修复**。
 
@@ -151,7 +143,7 @@
 
 ---
 
-## 3. 防护机制完整盘点（供修复参考）
+## 3. 检测机制盘点
 
 ### 3.1 壳层位掩码 `envFlags`（u32，bss `+0xd04`）
 
@@ -211,22 +203,7 @@ focus_lost / paste / multi_open / hb_resume / mass_replace / sample
 
 ---
 
-## 4. 修复优先级建议
-
-| 优先级 | 项目 | 理由 |
-|---|---|---|
-| **P0** | 实现客户端二进制完整性自校验（V-02） | 一切本地防护的前提：二进制可改则所有检测可被消音 |
-| **P0** | 截屏改用 ScreenCaptureKit（V-07） | 消除最容易实现的绕过面 |
-| **P1** | 进程扫描改用 libproc（V-04） | 消除对 patch 单点字符串的依赖 |
-| **P1** | macOS 实现证书 pinning（V-03） | 防止 MITM |
-| **P1** | DYLD 检测提前到 dyld 回调（V-05） | 防止环境被清除 |
-| **P2** | envFlags 只写 + 交叉校验（V-06） | 防止内存改位 |
-| **P2** | 焦点检测改为窗口级交叉验证（V-08） | 防止 swizzle |
-| **P3** | 指纹/虚拟化多维化（V-09、V-10） | 提升伪造成本 |
-
----
-
-## 5. 版本差异（1.1.7 → 1.3.0）
+## 4. 版本差异（1.1.7 → 1.3.0）
 
 逐字符串 diff 结论：
 
@@ -237,7 +214,7 @@ focus_lost / paste / multi_open / hb_resume / mass_replace / sample
 
 ---
 
-## 6. 披露说明
+## 5. 披露说明
 
 - 本报告用于**授权范围内的安全评估**，目的是帮助校方/厂商发现并修复问题。
 - 报告中**未包含可直接运行的完整利用代码**，仅描述原理与复现要点。

@@ -33,23 +33,12 @@ security find-generic-password -a device-key \
 
 | 文件 | 内容 |
 |---|---|
-| [SECURITY-REPORT.md](SECURITY-REPORT.md) | 问题清单。每条有位置、影响、绕过方法、修复建议 |
+| [SECURITY-REPORT.md](SECURITY-REPORT.md) | 问题清单。每条有位置、影响、绕过方法 |
 | [SECURITY-REPORT-FULL.md](SECURITY-REPORT-FULL.md) | 完整技术报告。含可编译的工具链代码 |
 
 先看简版。需要技术细节时再翻完整版。
 
 完整版第 4 节逐项讲绕过方法。第 5 节是完整工具链代码，能直接编译。
-
-## 修复建议
-
-按优先级排：
-
-1. 加客户端二进制完整性自校验。这是本地防护的前提。二进制可改，其他检测都能被消音。
-2. 截屏改用 ScreenCaptureKit。现在调外部命令，监控进程名就能绕过。
-3. 进程扫描改用 libproc。现在依赖 `/bin/ps`，改一个字符串就失效。
-4. 在 macOS 实现证书 pinning。客户端日志里写了这个还没做。
-
-设备私钥那条要单独处理。建议改用 Secure Enclave 生成不可导出的密钥，签名在硬件里完成。
 
 ## 范围与声明
 

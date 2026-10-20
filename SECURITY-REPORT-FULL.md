@@ -15,7 +15,6 @@
 4. [逐项绕过实现](#4-逐项绕过实现)
 5. [完整工具链代码](#5-完整工具链代码)
 6. [实现要点](#6-实现要点)
-7. [防护建议与优先级](#7-防护建议与优先级)
 8. [披露声明](#8-披露声明)
 
 ---
@@ -326,14 +325,6 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZQredXRgD1f0iNsCBFe0No9y...   ← 已截断
 
 **本质**：设备身份 = 私钥。私钥可读 = 设备身份可被任意本地程序冒用。
 
-#### 修复建议（按强度排序）
-
-| 方案 | 强度 | 说明 |
-|---|---|---|
-| **Secure Enclave** | ★★★ | `kSecAttrTokenIDSecureEnclave` + `kSecAccessControlBiometryAny`，私钥永不导出，签名在硬件内完成 |
-| `SecAccessControl` + 用户在场 | ★★ | `SecAccessControlCreateWithFlags(.userPresence)`，每次签名需 Touch ID / 密码 |
-| 绑定应用签名 | ★ | `SecAccessCreate` 限制仅本应用可访问 |
-| 禁止 `security` 命令访问 | ★ | 移除命令行工具对该项的信任 |
 
 ---
 
@@ -883,24 +874,7 @@ tccutil reset ListenEvent <bundle-id>
 
 `AXIsProcessTrusted()` 在部分系统上返回 false，但按键实际可用。用它决定是否弹授权提示，不要做硬性拦截。
 
-## 7. 防护建议与优先级
-
-| 优先级 | 建议 | 说明 |
-|---|---|---|
-| **P0** | **客户端二进制完整性自校验** | 一切本地防护的前提。校验 `__TEXT` 段哈希、签名、已加载 dylib 列表 |
-| **P0** | **截屏改用 ScreenCaptureKit** | 进程内截图，消除"监控 screencapture 进程"这条绕过 |
-| **P1** | 进程扫描改用 `libproc` / `sysctl(KERN_PROC)` | 不再依赖外部命令，消除单字符串 patch |
-| **P1** | macOS 实现证书 pinning | 当前明确未实现 |
-| **P1** | DYLD 检测提前到 dyld 回调 | 在 constructor 之前留环境快照 |
-| **P2** | `envFlags` 只写 + 交叉校验 | 防止内存改位 |
-| **P2** | 焦点检测改为窗口级交叉验证 | 用 CGWindowList 判断前台窗口 |
-| **P3** | 指纹/虚拟化多维化 | 提升伪造成本 |
-
-**补充限制**：请求签名绑定请求体哈希（`bodyHashHex`），修改 body 会被服务端识破。因此绕过范围只能停在本地检测层。
-
----
-
-## 8. 披露声明
+## 7. 披露声明
 
 - 本报告用于**授权范围内的安全评估**，目的是推动修复。
 - 所有验证在**本地测试环境**完成，未对生产服务端发起攻击。
