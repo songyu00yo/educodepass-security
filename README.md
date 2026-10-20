@@ -36,15 +36,11 @@ security find-generic-password -a device-key \
 | [SECURITY-REPORT.md](SECURITY-REPORT.md) | 问题清单。每条有位置、影响、绕过方法 |
 | [SECURITY-REPORT-FULL.md](SECURITY-REPORT-FULL.md) | 完整技术报告。含可编译的工具链代码 |
 
-先看简版。需要技术细节时再翻完整版。
-
 完整版第 4 节逐项讲绕过方法。第 5 节是完整工具链代码，能直接编译。
 
 ## 范围与声明
 
 评估在授权范围内进行。验证都在本地测试环境完成，没有攻击生产服务端。
-
-报告已脱敏。用户名、设备登记码、API 密钥、个人标识都移除了。
 
 ## License
 
