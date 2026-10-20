@@ -1,86 +1,95 @@
-# EduCodePass 客户端安全评估 · 完整技术报告（含绕过实现）
+# EduCodePass 客户端安全评估：技术报告
 
-> 目标：EduCodePass（东软信息学院「码途」C/C++ 闯关练习客户端）macOS 版
-> 版本：1.3.0（universal: x86_64 + arm64）
-> 样本 SHA-256：`5a3a07ebae2df12f4ea9676f9675e8547413369f3059c7bae6e27b5341d07b5d`
-> 测试环境：macOS 27.2（26B5112a），arm64，Apple M1 Pro
-> 性质：授权范围内的安全评估
-> 说明：文中已脱敏。每个结论标注验证方式，静态推断均注明局限。
+[返回项目首页](README.md) · [查看安全发现](SECURITY-REPORT.md)
 
-**统计口径**：本报告记录 **8 项当前版本存在的问题**，另附 **1 项历史问题**（V-01，1.3.0 已修复）。
+## 阅读说明
 
----
+本文补充技术细节，评估对象为 macOS 客户端 1.3.0。[样本与测试环境](SECURITY-REPORT.md#评估信息)见安全报告。
+
+共记录 8 项安全发现，其中 V-06 和 V-07 尚待运行时验证。历史问题 V-01 见[简版报告](SECURITY-REPORT.md#3-历史问题)。严重程度沿用原报告评级。
+
+| 发现 | 验证状态 | 主要边界 |
+| --- | --- | --- |
+| V-02、V-04、V-05、V-08 | 报告记录了动态观察 | 仅覆盖所述测试路径 |
+| V-13 | 读取和格式解析实测 | 服务端操作权限未验证 |
+| V-16 | 部分命令成功返回，敏感命令返回参数错误 | 敏感命令执行效果未验证 |
+| V-06、V-07 | 静态推断 | 内存改写和截图隐藏成功率未验证 |
+
+第 5 节保留原有验证代码；第 6 节保留实现记录。仓库未附独立编译与运行验收记录，文档整理未验证这些代码。下文的本地观察不代表服务端的最终判定。
 
 ## 目录
 
 1. [目标概况](#1-目标概况)
 2. [威胁模型](#2-威胁模型)
-3. [完整绕过链（总览）](#3-完整绕过链总览)
-4. [逐项绕过实现](#4-逐项绕过实现)
-5. [完整工具链代码](#5-完整工具链代码)
+3. [验证流程概览](#3-验证流程概览)
+4. [逐项验证记录](#4-逐项验证记录)
+5. [验证代码](#5-验证代码)
 6. [实现要点](#6-实现要点)
-8. [披露声明](#8-披露声明)
+7. [披露声明](#7-披露声明)
 
----
+## 术语说明
+
+| 术语 | 含义 |
+| --- | --- |
+| IPC | Inter-Process Communication，进程间通信 |
+| ACL | Access Control List，访问控制列表 |
+| dylib | macOS 动态库 |
+| DYLD | macOS 动态链接器 dyld 相关环境变量的前缀 |
+| 证书固定 | Certificate pinning，除标准证书验证外，限制可接受的证书或公钥 |
+| TCC | Transparency, Consent, and Control，macOS 隐私权限机制 |
 
 ## 1. 目标概况
 
 | 项 | 值 |
-|---|---|
+| --- | --- |
 | Bundle ID | `cn.edu.neusoft.codepass.client` |
 | 版本 | 1.3.0 |
-| 架构 | universal（x86_64 + arm64） |
-| 签名 | adhoc + hardened runtime（`flags=0x10002`），**无 Team ID** |
+| 架构 | 通用二进制（x86_64、arm64） |
+| 签名 | adhoc + hardened runtime（`flags=0x10002`），无 Team ID |
 | 技术栈 | Tauri v2 / Rust 后端 + 远程 Web 前端 |
 | 前端 | `https://codepass.neusoft.edu.cn/` |
 | 接入 | 深信服 aTrust 零信任 VPN + 企业微信扫码 |
-| 主二进制 | `educodepass`（约 13,999,632 字节） |
+| 主二进制 | `educodepass`（13,999,632 字节） |
 
-**架构特点**：客户端壳不承载业务逻辑。题目、评测、评分、行为分析都在远程前端和服务端。壳只做四件事：请求签名、设备指纹、环境检测、反作弊上报。
+架构特点：客户端壳不承载业务逻辑。题目、评测、评分、行为分析都在远程前端和服务端。壳只做四件事：请求签名、设备指纹、环境检测、反作弊上报。
 
-**Fat 切片**（基址/文件偏移）：
+通用二进制的架构切片文件偏移：
 
 | 架构 | 文件偏移 |
-|---|---|
+| --- | --- |
 | x86_64 | `0x4000` |
 | arm64 | `0x6d8000` |
 
----
-
 ## 2. 威胁模型
 
-攻击者假设：**能登录考试系统的普通学生账号**，对目标主机有本地用户权限，能读写应用目录。
+攻击者假设：攻击者持有能登录考试系统的普通学生账号，拥有本地用户权限，能读写应用目录。
 
 不在范围内：服务端入侵、网络层攻击、物理接触。
 
-**评估目标**：验证客户端本地反作弊检测的**有效性**（即：能否在不被客户端检测的情况下观察/干预评分流程）。
+评估目标：检查修改客户端后，本地检测能否识别异常。服务端评分流程与业务权限不在本次验证范围内。
 
----
-
-## 3. 完整绕过链（总览）
+## 3. 验证流程概览
 
 ```
 ① 复制原版 App → 改名（保住原版）
 ② 主二进制改名 educodepass → educodepass.real
 ③ 放入自定义 shim 作为新主二进制（负责注入）
-④ 编译注入用的 dylib（内含全部绕过逻辑）
+④ 准备注入用的 dylib
 ⑤ patch 二进制内的 /bin/ps 字符串 → /bin/pX
 ⑥ adhoc 重签名（必须显式指定 identifier + runtime）
 ⑦ 启动 → shim 注入 dylib → exec 真二进制
-⑧ dylib constructor 清 DYLD 痕迹 → 检测全部失效
+⑧ 观察各检测项的日志和异常位，分别记录结果
 ```
 
-**一句话总结**：**因为客户端不校验自身二进制完整性（V-02），后续所有本地检测都可以被消音。**
+报告记录了修改客户端后部分检测结果发生变化的情况。各项验证边界见第 4 节，不能据此认定所有本地检测失效。
 
----
+## 4. 逐项验证记录
 
-## 4. 逐项绕过实现
+### 4.1 V-02 二进制完整性
 
-### 4.1 V-02 二进制完整性 → 基础绕过后门
+静态观察：相关字符串检索结果均为 0，不能据此证明不存在完整性校验。简版报告另记录了修改后正常启动与提交的情况，结论仅覆盖该测试路径。
 
-**为什么可行**：二进制里找不到 `CDHash`、`integrity`、`tamper`、`codesign`、`_CodeSignature` 这些字符串。出现次数都是 0。说明客户端从不校验自己。
-
-**实现步骤**：
+实现步骤：
 
 ```bash
 # 1. 复制原版（保留未修改副本）
@@ -100,20 +109,20 @@ cp /tmp/anti-detect.dylib ../Frameworks/
 # 5. 重签名（见 §5.3，必须显式指定 identifier）
 ```
 
----
+### 4.2 V-04 进程黑名单
 
-### 4.2 V-04 进程黑名单 → patch `/bin/ps`
+原理：客户端执行 `/bin/ps -A -o ucomm=` 获取进程名，与本地名单和服务端名单比对。原记录列出本地名单 204 项，服务端名单实测为 65～69 条。
 
-**原理**：客户端执行 `/bin/ps -A -o ucomm=` 获取进程名列表，与本地名单（204 项）+ 服务端动态下发名单（实测 65 条）比对。把二进制里的字符串 `/bin/ps` 改成不存在的路径，`exec` 就会失败，扫描永远返回空。
+报告记录了修改命令路径后无法取得进程列表的情况，未验证是否存在补充检测。
 
-**patch 点（实测文件偏移）**：
+文件修改位置（原记录中的文件偏移）：
 
 | 架构 | 偏移 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | x86_64 | `0x5920d8` | 字符串 `/bin/ps\0` |
-| arm64 | `0xbcd530` | **codesign 后实际落到 `0xbc9530`** |
+| arm64 | `0xbcd530` | codesign 后实际落到 `0xbc9530` |
 
-**实现**：
+实现：
 
 ```python
 # 把 "/bin/ps" → "/bin/pX"（只改 1 字节，长度不变，无需调整结构）
@@ -133,23 +142,21 @@ def patch_ps(path):
     return count
 ```
 
-**验证**：
+验证：
 
 ```bash
 grep -a -c "/bin/pX" EduCodePass-clean.app/Contents/MacOS/educodepass.real
 ```
 
-> ⚠️ **不要死记 offset**：codesign 会改变 arm64 的实际落点，务必用 `grep -a` 验证。
+> 文件偏移取决于当前样本与签名状态。原记录列出签名前后的不同偏移，不能直接套用于其他样本。
 
-**效果**：启动日志不再出现 `已提示被限制的程序`，`envFlags 0x20` 永不置位。
-
----
+观察结果：在所述测试路径中，启动日志未出现 `已提示被限制的程序`，未观察到 `envFlags 0x20` 置位。
 
 ### 4.3 V-05 DYLD 检测 → `unsetenv`
 
-**原理**：客户端检查环境变量 `DYLD_INSERT_LIBRARIES`，命中时记 `环境变量被篡改` 位并清除。
+原理：客户端检查环境变量 `DYLD_INSERT_LIBRARIES`，命中时记 `环境变量被篡改` 位并清除。
 
-**绕过**：注入的 dylib 在 **constructor**（最早执行点）里把环境变量抹掉，客户端后续读到的就是空值。
+验证思路：注入代码在初始化函数中清除环境变量。是否影响检测，取决于注入代码与检测逻辑的执行顺序。
 
 ```objc
 __attribute__((constructor))
@@ -161,37 +168,33 @@ static void init_hook(void) {
 }
 ```
 
-**效果**：stderr 不再出现 `检测到 DYLD_INSERT_LIBRARIES=...`，`envFlags 0x40` 永不置位。
+观察结果：在所述测试路径中，未观察到对应环境变量告警或 `envFlags 0x40` 置位。该结果只覆盖环境变量检测。
 
----
+### 4.4 V-06 环境位掩码改写风险（待验证）
 
-### 4.4 V-06 envFlags 位掩码 → 无需处理
+原理：检测结果以 `u32` 记录在 bss 区偏移 `+0xd04`。
 
-**原理**：检测结果以 `u32` 记录在 bss 区偏移 `+0xd04`。
-
-**已知位**：
+已知位：
 
 | 位 | 含义 |
-|---|---|
+| --- | --- |
 | `0x4` | 屏幕采集（截屏）异常 |
 | `0x20` | 进程黑名单命中 |
 | `0x40` | 环境变量被篡改 |
 | `0x100` | 失焦（切屏） |
 | `0x200` | 客户端环境被篡改 |
 
-**说明**：§4.2 和 §4.3 已让对应位不置位，不需要额外改内存。改内存最容易被交叉校验抓到。
+验证边界：本次未改写环境位掩码。第 4.2 节和第 4.3 节的观察不能证明内存改写有效，也未验证相关交叉校验。
 
----
+### 4.5 V-07 截屏进程监控风险（待验证）
 
-### 4.5 V-07 截屏监考 → 进程名监控
-
-**原理**：客户端调用 `/usr/sbin/screencapture` 抓屏（**外部进程**），触发分类：
+原理：客户端调用 `/usr/sbin/screencapture` 抓屏（外部进程），触发分类：
 
 ```
 focus_lost / paste / multi_open / hb_resume / mass_replace / sample
 ```
 
-**绕过**：监控 `screencapture` 进程是否出现，出现即隐藏作弊窗口，等它退出再恢复。
+验证思路：观察截图进程与测试窗口状态的时序关系。下方代码为原报告片段，实际效果未验证。
 
 ```swift
 // 用 libproc 直接读进程表（不 spawn 子进程，零痕迹）
@@ -218,16 +221,13 @@ Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
 }
 ```
 
-**为什么有效**：抓屏是**子进程**，进程名可被监控；窗口在抓屏前就已从屏幕上消失。
+验证边界：检测到进程后，截图可能已经完成。轮询间隔、窗口隐藏延迟和截图参数都会影响结果，本次未统计成功率。
 
+### 4.6 V-08 窗口焦点检测
 
----
+原理：`-[NSWindow resignKeyWindow]` 被调用即视为“切屏”，计入 `envFlags 0x100` + 前端 `focusLostCount`。
 
-### 4.6 V-08 窗口焦点检测 → swizzle `resignKeyWindow`
-
-**原理**：`-[NSWindow resignKeyWindow]` 被调用即视为"切屏"，计入 `envFlags 0x100` + 前端 `focusLostCount`。
-
-**绕过**：把该方法替换为 no-op，窗口永不 resignKey。
+观察结果：简版报告记录了替换方法后，切换前台应用未触发失焦记录的情况。该结果只覆盖所述检测路径。
 
 ```objc
 static void void_noop(id self, SEL cmd) { /* 什么都不做 */ }
@@ -241,17 +241,15 @@ static void init_hook(void) {
 }
 ```
 
-**补充**：前端 `blur` / `focus` 事件也要拦（JS 层），见 §5.2 的 `kShield` 脚本。
+补充：前端 `blur` / `focus` 事件也要拦（JS 层），见第 5.2 节的 `kShieldJS` 脚本。
 
----
+### 4.7 V-13 设备私钥读取
 
-### 4.7 V-13 设备私钥读取（**严重 · 未修复**）
+本项沿用原报告的严重评级。测试条件与影响边界见[简版报告](SECURITY-REPORT.md#2-安全发现)。
 
-**这是本次评估中除 V-01 外最严重的问题。**
+**（1）现象**
 
-#### 现象
-
-一条命令，无需任何高权限，直接读出设备私钥：
+原报告记录：在同一登录会话中，普通用户运行系统工具读取私钥，返回码为 0，未出现图形授权提示。
 
 ```bash
 security find-generic-password \
@@ -266,7 +264,7 @@ security find-generic-password \
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0w...   ← 已截断
 ```
 
-#### 格式验证
+**（2）格式验证**
 
 ```bash
 security find-generic-password -a device-key \
@@ -285,7 +283,7 @@ SEQUENCE
   OCTET STRING [HEX DUMP]: 306B0201010420...   ← 私钥本体
 ```
 
-进一步派生公钥，证明是**可用私钥**：
+原记录还展示了派生公钥的结果。这说明输出可解析为私钥，尚不能证明服务端接受相关操作。
 
 ```bash
 security find-generic-password -a device-key \
@@ -299,7 +297,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZQredXRgD1f0iNsCBFe0No9y...   ← 已截断
 -----END PUBLIC KEY-----
 ```
 
-#### 为什么能读
+**（3）访问控制观察**
 
 客户端用如下命令创建 Keychain 项：
 
@@ -310,31 +308,19 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZQredXRgD1f0iNsCBFe0No9y...   ← 已截断
   -w <随机生成的私钥>
 ```
 
-**未设置任何 `SecAccessControl`**（`find-generic-password` 输出中无 ACL 段），因此该项对当前登录用户的所有进程可读。
+访问控制边界：原记录未见访问控制列表输出，但这不足以证明没有访问控制。读取结果只代表测试进程在当时会话中的访问情况。
 
-#### 完整影响链
+**（4）潜在影响与验证边界**
 
-```
-读取 device_key（P-256 私钥）
-        ↓
-对任意 body 计算 SHA256 → bodyHashHex
-        ↓
-用该私钥签名（ECDSA P-256）
-        ↓
-调用同格式请求 → 服务端用对应公钥验签通过
-        ↓
-以该设备身份发送任意请求（提交答案、读取数据、绕过设备级限制）
-```
+读取私钥 → 解析私钥并派生公钥（报告已记录）
 
-**本质**：设备身份 = 私钥。私钥可读 = 设备身份可被任意本地程序冒用。
+后续风险：私钥可能用于设备签名。服务端接受范围与业务操作效果未验证。
 
-
----
-
+私钥泄露可能影响设备身份校验。登录态、权限和服务端请求校验仍会限制操作范围，本次未验证设备身份冒用的完整过程。
 
 ### 4.8 V-16 IPC ACL 配置不一致
 
-**背景**：页面 JS 里 `window.__TAURI__.core.invoke` 可用。
+背景：页面 JS 里 `window.__TAURI__.core.invoke` 可用。
 
 探测方式：
 
@@ -344,57 +330,56 @@ var T = window.__TAURI__;
 // app|core|dpi|event|image|menu|mocks|path|tray|webview|webviewWindow|window
 ```
 
-#### 怎么区分「ACL 拒绝」和「参数缺失」
+**（1）错误类型与判断依据**
 
-Tauri v2 的执行顺序是先检查 ACL，再做参数反序列化。所以两种错误可以分开：
+原报告依据 Tauri v2 的权限检查和参数校验顺序，区分以下错误。具体顺序仍需结合当前版本实现核对：
 
 | 错误类型 | 含义 |
-|---|---|
+| --- | --- |
 | `not allowed by ACL` | 权限拒绝，命令未被授权 |
-| `invalid args xxx` | 权限已通过，只是参数不匹配 |
+| `invalid args xxx` | 已进入参数校验，执行效果未验证 |
 
-#### 测试结果
+**（2）测试结果**
 
 从页面上下文调用，参数传空对象 `{}`：
 
 | 命令 | 返回 | 判定 |
-|---|---|---|
+| --- | --- | --- |
 | `device_id_get` | 返回成功 | ACL 放行 |
 | `device_fingerprint` | 返回成功 | ACL 放行 |
 | `device_pubkey` | 返回成功 | ACL 放行 |
-| `sign_request` | `not allowed by ACL` | **拒绝** |
+| `sign_request` | `not allowed by ACL` | 拒绝 |
 | `sign_endorsement` | `invalid args method` | ACL 放行，缺 method |
 | `apply_client_config` | `invalid args blockProcesses` | ACL 放行，缺 blockProcesses |
 | `open_client_window` | `invalid args url` | ACL 放行，缺 url |
 | `sign_set_key` | `invalid args key` | ACL 放行，缺 key |
 
-#### 结论
+**（3）结论**
 
-`sign_request` 被正确限制，页面无法借用客户端签名能力。
+本次页面上下文调用 `sign_request` 返回权限拒绝。
 
-但 `sign_set_key`（替换签名密钥）没有被限制。这两个命令的敏感程度同级，权限配置却不同。
+`sign_set_key` 返回参数错误，表现与 `sign_request` 不同。应结合各命令的用途核对授权策略；本次未验证密钥替换效果。
 
-#### 未验证的部分
+**（4）未验证的部分**
 
-`sign_set_key`、`open_client_window`、`apply_client_config` 只验证到「权限放行 + 参数校验失败」这一步。
+`sign_set_key`、`open_client_window`、`apply_client_config` 只观察到参数校验错误。
 
-没有传入完整参数实际执行，原因：
+原记录未传入完整参数，并列出以下考虑：
 
-- `sign_set_key` 会替换设备密钥，可能破坏当前设备登记
-- `open_client_window` 会触发 `multi_open`，这是截图触发分类之一
-- `apply_client_config` 之前验证过改配置不影响检测
+- `sign_set_key` 会替换设备密钥，可能破坏当前设备登记。
+- `open_client_window` 会触发 `multi_open`，这是截图触发分类之一。
+- `apply_client_config` 曾有配置变更的观察记录，但未附完整测试条件。
 
-所以「能否调用」是证明的，「调用后产生什么效果」没有验证。
+上述敏感命令只验证到参数校验阶段，尚未验证能否执行成功及执行效果。
 
+### 4.9 其他安全机制观察
 
----
+**（1）IPC 命令与权限标识**
 
-### 4.9 逆向补充：完整攻击面清单
+下表记录静态检出的权限标识，不代表当前页面获得相应授权。运行时结果见第 4.8 节。
 
-#### IPC 命令面（23 个，含 ACL 配对）
-
-| 命令 | ACL |
-|---|---|
+| 命令 | 检出的权限标识 |
+| --- | --- |
 | `apply_client_config` | allow / deny |
 | `capture_shot` | allow / deny |
 | `close_client_window` | allow / deny |
@@ -408,7 +393,7 @@ Tauri v2 的执行顺序是先检查 ACL，再做参数反序列化。所以两�
 | `sign_endorsement` | allow |
 | `sign_set_key` | allow |
 
-#### Tauri IPC 安全机制（**正常，非漏洞**）
+**（2）Tauri IPC 校验相关信息**
 
 ```
 Tauri-Invoke-Key header     ← invoke key 校验
@@ -418,7 +403,7 @@ missing Origin header
 IpcBlocked
 ```
 
-#### 更新机制（**校验完整，非漏洞**）
+**（3）更新签名校验相关信息**
 
 ```
 端点: https://codepass.neusoft.edu.cn/client/mac/latest-mac.json
@@ -430,7 +415,7 @@ IpcBlocked
   · The signature was created with a different key than the one provided
 ```
 
-#### 设备指纹采集链（外部命令，可 patch）
+**（4）设备指纹与密钥读取命令**
 
 ```
 /usr/sbin/ioreg -c IOPlatformExpertDevice        → IOPlatformUUID
@@ -438,12 +423,9 @@ IpcBlocked
 /usr/bin/security find-generic-password          → device_key（见 V-13）
 ```
 
-> 这三条与 `/bin/ps` 同性质：**都依赖外部命令**，patch 二进制内路径即可使采集失败。可作为 V-04 的同类问题记录。
+> 上述功能依赖外部命令。路径修改后的实际行为与失败处理尚未逐项验证。
 
-
----
-
-## 5. 完整工具链代码
+## 5. 验证代码
 
 ### 5.1 shim.c（启动桩）
 
@@ -481,15 +463,13 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-**编译**：
+编译：
 
 ```bash
 clang -O2 -arch arm64 -arch x86_64 -o shim shim.c
 ```
 
-> 注意：shim 是 universal，**不要 strip**，否则签名会变。
-
----
+> 注意：shim 是 universal，不要 strip，否则签名会变。
 
 ### 5.2 anti-detect-v4.m（注入 dylib）
 
@@ -650,7 +630,7 @@ static void patch_webkit(void) {
 }
 ```
 
-**编译**：
+编译：
 
 ```bash
 clang -dynamiclib -fobjc-arc -arch arm64 -arch x86_64 \
@@ -658,11 +638,9 @@ clang -dynamiclib -fobjc-arc -arch arm64 -arch x86_64 \
   -o anti-detect.dylib anti-detect-v4.m
 ```
 
----
-
 ### 5.3 assemble2.py（组装 + 签名）
 
-**这是整个方案最容易翻车的一步**。三个必须显式处理的点：
+本节保留组装与签名脚本，涉及应用副本、组件签名和签名标识。
 
 ```python
 #!/usr/bin/env python3
@@ -723,7 +701,7 @@ run("codesign", "--force", "--sign", "-",
 print("[+] done")
 ```
 
-**ent.plist**（hardened runtime 下允许注入所必需）：
+ent.plist（hardened runtime 下允许注入所必需）：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -736,11 +714,9 @@ print("[+] done")
 </plist>
 ```
 
----
-
 ### 5.4 relay.py（本地中转，HTTPS）
 
-**为什么用 Python 不用 Node**：`node` 在客户端的进程黑名单里。
+原记录使用 Python 编写本地中转程序，并指出 `node` 在进程黑名单中。
 
 ```python
 #!/usr/bin/env python3
@@ -784,18 +760,16 @@ httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
 httpd.serve_forever()
 ```
 
-**自签证书**：
+自签证书：
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -keyout relay.key -out relay.crt \
   -days 3650 -nodes -subj "/CN=127.0.0.1"
 ```
 
----
-
 ### 5.5 浮窗输入（CGEvent）
 
-**核心**：用 CGEvent 模拟键盘，绕开剪贴板禁用；`isTrusted=true`（不像 JS 合成事件）。
+原记录使用 CGEvent 模拟键盘输入，并将其与 JavaScript 合成事件作比较。事件可信标记与客户端是否接受输入应分别验证。
 
 ```swift
 final class Typer {
@@ -852,24 +826,22 @@ final class Typer {
 }
 ```
 
----
-
 ## 6. 实现要点
 
-这 10 条是做出可用工具必须处理的技术点。每条给出做法。
+以下为原测试中的实现记录。结果可能受系统版本、应用签名和编辑器实现影响，尚未作为通用结论验证。
 
-### 6.1 patch 后验证，不记偏移
+### 6.1 文件偏移与样本状态
 
-`/bin/ps` 的 patch 位置会随签名变化。改完用 `grep -a` 确认：
+原记录中的文件偏移在签名前后不同。以下保留字符串检查示例：
 
 ```bash
 grep -a -c "/bin/pX" <binary>   # 应该有匹配
 grep -a -c "/bin/ps" <binary>   # 应该为 0
 ```
 
-### 6.2 签名必须显式指定 identifier
+### 6.2 签名标识与钥匙串访问
 
-codesign 默认给非标准位置的二进制生成随机 identifier。Keychain 访问绑定 identifier，随机值会导致取不到设备私钥，表现是提交时报签名错误。
+原记录将签名标识变化与钥匙串读取失败联系起来，现有材料未单独验证因果关系。钥匙串访问条件还需结合实际访问控制配置判断。
 
 指定方式：
 
@@ -884,7 +856,7 @@ codesign --force --sign - \
 
 ### 6.3 组合键改用单键
 
-CGEvent 发组合键时，修饰标志不可靠。需要反缩进时，用三步：
+原测试记录了组合键输入异常，以下为当时采用的分步输入示例：
 
 ```swift
 keyStroke(123, [.maskCommand])   // Cmd+← 到行首
@@ -894,7 +866,7 @@ keyStroke(124, [.maskCommand])   // Cmd+→ 回行尾
 
 ### 6.4 WebKit 用 keycode 注入字符
 
-`keyboardSetUnicodeString` 对 WebKit 无效。改用 `virtualKey` 加 keycode：
+原测试未通过 `keyboardSetUnicodeString` 完成目标输入，随后使用了虚拟键码。该观察不能推广到所有 WebKit 场景。
 
 ```swift
 if let (code, shift) = map[ch] {
@@ -961,23 +933,21 @@ os.kill(int(open("/tmp/relay.pid").read()), signal.SIGTERM)
 
 ### 6.9 重签名后重置 TCC 授权
 
-TCC 授权绑定 CDHash。重签名后授权失效，用 tccutil 重置：
+原测试记录了重签名后需要重新授权的情况。授权是否保留取决于系统的身份判定，不能仅归因于 CDHash。以下保留原记录中的重置命令：
 
 ```bash
 tccutil reset Accessibility <bundle-id>
 tccutil reset ListenEvent <bundle-id>
 ```
 
-### 6.10 权限检查只作提示
+### 6.10 权限检查与输入结果
 
-`AXIsProcessTrusted()` 在部分系统上返回 false，但按键实际可用。用它决定是否弹授权提示，不要做硬性拦截。
+原记录称权限检查返回 `false` 时仍观察到按键输入，但未列出对应系统版本与完整条件。权限判断与输入结果应分别记录，不能据此制定通用处理规则。
 
 ## 7. 披露声明
 
-- 本报告用于**授权范围内的安全评估**。
-- 所有验证在**本地测试环境**完成，未对生产服务端发起攻击。
-- 文中**已脱敏**：用户名、设备登记码、API 密钥、个人标识均已移除。
+- 本报告用于授权范围内的安全评估。
+- 所有验证在本地测试环境完成，未对生产服务端发起攻击。
+- 文中已脱敏：用户名、设备登记码、API 密钥、个人标识均已移除。
 
----
-
-*最后更新：2026-10-16*
+原报告日期：2026-10-16。文档整理日期：2026-10-20。
