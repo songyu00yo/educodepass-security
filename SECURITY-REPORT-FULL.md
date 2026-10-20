@@ -1,6 +1,6 @@
 # EduCodePass 客户端安全评估 · 完整技术报告（含绕过实现）
 
-> 目标：EduCodePass（东北大学「码途」C/C++ 闯关练习客户端）macOS 版
+> 目标：EduCodePass（东软信息学院「码途」C/C++ 闯关练习客户端）macOS 版
 > 版本：1.3.0（universal: x86_64 + arm64）
 > 性质：授权范围内的安全评估与防护有效性验证
 > 说明：本报告包含完整的绕过实现与调试经验，用于**推动修复**；文中已对所有个人标识做脱敏处理。
@@ -14,7 +14,7 @@
 3. [完整绕过链（总览）](#3-完整绕过链总览)
 4. [逐项绕过实现](#4-逐项绕过实现)
 5. [完整工具链代码](#5-完整工具链代码)
-6. [实战踩坑记录（技术价值最高）](#6-实战踩坑记录技术价值最高)
+6. [实现要点](#6-实现要点)
 7. [防护建议与优先级](#7-防护建议与优先级)
 8. [披露声明](#8-披露声明)
 
@@ -243,23 +243,7 @@ static void init_hook(void) {
 
 ---
 
-### 4.7 V-09 / V-10 指纹与虚拟化
-
-**未处理**：`IOPlatformUUID`（硬件指纹）与 `/usr/sbin/sysctl`（虚拟化检测）在本方案中**未做绕过**。
-
-**原因**：实际测试环境是物理 Mac，虚拟化检测本来就不会命中；伪造 `IOPlatformUUID` 风险高收益低（可能引发设备登记异常）。
-
-**若要绕过**（供防护方参考攻击面）：
-
-```objc
-// 虚拟化：hook sysctl 的 KERN_HV 查询
-// 指纹：hook IOKit 的 IOPlatformUUID 读取，返回受控值
-```
-
----
-
-
-### 4.8 V-13 设备私钥读取（**严重 · 未修复**）
+### 4.7 V-13 设备私钥读取（**严重 · 未修复**）
 
 **这是本次评估中除 V-01 外最严重的问题。**
 
@@ -353,58 +337,7 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZQredXRgD1f0iNsCBFe0No9y...   ← 已截断
 
 ---
 
-### 4.9 V-14 配置 URL 环境变量劫持（信息级）
-
-#### 验证过程
-
-```bash
-# 1. 起本地监听
-python3 -m http.server 9999 &
-
-# 2. 带环境变量启动
-GOGO_CLIENT_CONFIG_URL="http://127.0.0.1:9999/cfg" ./educodepass
-```
-
-本地服务器**确实收到请求**：
-
-```
-[CAPTURED] GET /cfg
-  Headers: {'Host': '127.0.0.1:9999', 'User-Agent': 'curl/8.7.1', 'Accept': '*/*'}
-```
-
-#### 为什么不能投毒
-
-尝试返回伪造配置：
-
-```json
-{"minVersion":"0.0.1","blockProcesses":["CANARY_A","CANARY_B","CANARY_C"],"off":true}
-```
-
-重启后日志**仍显示内置的 68 条名单**：
-
-```
-[update] 应用服务端下发的进程名单：68 条
-```
-
-即使把 URL 指向不存在的端口（连接失败），仍显示 68 条 → **名单是本地内置的，配置只是补充**。
-
-**结论**：可劫持请求（信息泄露：UA、请求时机），但**无法通过配置投毒削弱检测**。
-
----
-
-### 4.10 V-15 本地配置文件可篡改（低危）
-
-```
-~/Library/Application Support/gogo-client/config.json     （-rw-r--r--）
-~/Library/Application Support/gogo-client/device_id.txt
-~/Library/Application Support/gogo-client/update.log      ← 记录每次启动的名单条数
-```
-
-直接改写 `config.json` 并重启，检测行为不变（同 §4.9 结论）。**可篡改，但无实际收益**。
-
----
-
-### 4.11 逆向补充：完整攻击面清单
+### 4.8 逆向补充：完整攻击面清单
 
 #### IPC 命令面（23 个，含 ACL 配对）
 
@@ -832,38 +765,24 @@ final class Typer {
 
 ---
 
-## 6. 实战踩坑记录（技术价值最高）
+## 6. 实现要点
 
-这一节是**踩过的所有坑**，对做同类工具的读者最有参考价值。
+这 10 条是做出可用工具必须处理的技术点。每条给出做法。
 
-### 6.1 `/bin/ps` 的 offset 会变
+### 6.1 patch 后验证，不记偏移
 
-**现象**：按逆向得到的 arm64 偏移 `0xbcd530` 打 patch，重启后扫描又生效了。
-
-**原因**：**codesign 会改变 arm64 段的落点**，实际落到 `0xbc9530`。
-
-**教训**：**永远用 `grep -a` 验证，不要死记 offset**：
+`/bin/ps` 的 patch 位置会随签名变化。改完用 `grep -a` 确认：
 
 ```bash
 grep -a -c "/bin/pX" <binary>   # 应该有匹配
 grep -a -c "/bin/ps" <binary>   # 应该为 0
 ```
 
-### 6.2 codesign 的 identifier 必须显式指定（最坑）
+### 6.2 签名必须显式指定 identifier
 
-**现象**：客户端能启动、能读题，但**提交时弹「签名不匹配」/「Server error」**。
+codesign 默认给非标准位置的二进制生成随机 identifier。Keychain 访问绑定 identifier，随机值会导致取不到设备私钥，表现是提交时报签名错误。
 
-**排查过程**：
-
-```bash
-codesign -dv --verbose=4 <app> 2>&1 | grep Identifier
-# 原版:   Identifier=cn.edu.neusoft.codepass.client
-# 注入版: Identifier=educodepass-555549448d09...   ← 随机生成！
-```
-
-**根因**：`.real` 不在 bundle 的标准位置（`Contents/MacOS/` 下但被改名），codesign 自动生成了随机 identifier。而 **Keychain 访问权限绑定签名 identifier** → 客户端取不到设备私钥 → 签名数据异常 → 服务端拒绝。
-
-**修复**：
+指定方式：
 
 ```bash
 codesign --force --sign - \
@@ -872,175 +791,97 @@ codesign --force --sign - \
   --entitlements ent.plist educodepass.real
 ```
 
-**还有第二个坑**：末尾如果用 `--deep` 签整个 bundle，**会递归重签并覆盖掉**你刚指定的 identifier。必须改成不带 `--deep` 的显式签名。
+签 bundle 时不要加 `--deep`。它会递归重签，覆盖上面指定的 identifier。
 
-**验证**：
+### 6.3 组合键改用单键
 
-```bash
-codesign -dv --verbose=4 EduCodePass-clean.app/Contents/MacOS/educodepass.real 2>&1 | grep -E "Identifier|flags"
-# 期望: Identifier=cn.edu.neusoft.codepass.client
-#       flags=0x10002(adhoc,runtime)
-```
-
-### 6.3 `CGEvent` 的 `.maskShift` 单独设置会失效
-
-**现象**：想发 `Shift+Tab`（反缩进），代码里设了 `.maskShift` 标志，**实际发出的是正向 Tab**，导致缩进越改越大（4→8→16→32…死循环）。
-
-**原因**：通过 `.privateState` 事件源发送时，**单独设置修饰键 flag 不可靠**，被系统丢弃。
-
-**尝试过的修复（都无效）**：
-
-```swift
-// ❌ 直接设 flag
-d.flags = .maskShift
-
-// ❌ 显式发 Shift 键的按下/释放事件再发 Tab
-CGEvent(..., virtualKey: 56, keyDown: true)   // Shift down
-CGEvent(..., virtualKey: 48, keyDown: true)   // Tab down
-```
-
-**最终方案**：**不用任何带修饰键的组合**。需要"反缩进"时改用：
+CGEvent 发组合键时，修饰标志不可靠。需要反缩进时，用三步：
 
 ```swift
 keyStroke(123, [.maskCommand])   // Cmd+← 到行首
-keyStroke(117, [])               // Forward Delete 删行首空格
+keyStroke(117, [])               // Forward Delete 删空格
 keyStroke(124, [.maskCommand])   // Cmd+→ 回行尾
 ```
 
-**教训**：**能用单键解决的，绝不用组合键**。
+### 6.4 WebKit 用 keycode 注入字符
 
-### 6.4 WKWebView 不认 `keyboardSetUnicodeString`
-
-**现象**：用 `CGEvent.keyboardSetUnicodeString()` 注入字符，在 TextEdit 里正常，**在 WebKit 编辑器里完全没反应**。
-
-**验证方法**（重要）：分别测试两种注入方式在同一目标里的效果：
-
-| 方式 | TextEdit | WebKit 编辑器 |
-|---|---|---|
-| `keyboardSetUnicodeString` | ✅ 有效 | ❌ **被忽略** |
-| `virtualKey` keycode | ✅ 有效 | ✅ 有效 |
-
-**结论**：WebKit 只认 `virtualKey`，不认 Unicode 覆盖。
-
-**推论**：中文输入法会把 keycode 转成候选字（`n`→`呢`、`range`→`让哥`），所以必须**先切英文输入法**再用 keycode。
-
-### 6.5 搜狗输入法会中途抢回激活
-
-**现象**：输入前已用 `TISSelectInputSource` 切到 ABC，输入到一半又开始出中文。
-
-**原因**：搜狗等输入法会在检测到键盘活动时**自动抢回激活**。
-
-**修复**：输入过程中定期检查、被抢回就重切：
+`keyboardSetUnicodeString` 对 WebKit 无效。改用 `virtualKey` 加 keycode：
 
 ```swift
-var guard = 0
-for ch in body {
-    guard += 1
-    if guard >= 15 {
-        guard = 0
-        if let cur = currentInputId(), cur != "com.apple.keylayout.ABC" {
-            if let en = englishInput() { TISSelectInputSource(en) }
-            usleep(350_000)
-        }
-    }
-    // 输入字符...
+if let (code, shift) = map[ch] {
+    postKey(code, shift)
 }
 ```
 
-### 6.6 keyDown/keyUp 间隔太短会丢字符
+### 6.5 注入前切英文输入法
 
-**现象**：长文本输入后，编辑器里少了几个字符（实测丢过 `oo`、`)`）。
-
-**原因**：CGEvent 的 keyDown 和 keyUp 发得太密，系统事件队列处理不过来。
-
-**修复**：
+中文输入法会把 keycode 转成候选字。输入前切到 ABC，输入中定期检查：
 
 ```swift
-// keyDown 后必须留间隔再发 keyUp
-usleep(4000)   // 4ms
+if let cur = currentInputId(), cur != "com.apple.keylayout.ABC" {
+    if let en = englishInput() { TISSelectInputSource(en) }
+    usleep(350_000)
+}
 ```
 
-**验证方法**：输入同一段代码 10 次，对比每次结果。
+每 15 个字符检查一次。
 
-### 6.7 编辑器自动缩进是个无底洞
+### 6.6 keyDown 与 keyUp 留间隔
 
-**现象**：不管怎么算缩进，总有一两行不对。
+两者之间留 4 ms。间隔太短会丢字符。
 
-**根因**：编辑器有自己的自动缩进行为，且**不公开**：
-
-```
-换行自动缩进 = 上一行缩进 + (上一行以冒号结尾 ? 2 格 : 0)
-但某些行（如 "s = ... else 0"）会意外多给缩进
-Tab = 2 格（不是 4）
+```swift
+usleep(4000)
 ```
 
-**结论**：**任何"预测编辑器行为"的方案都会漏**。
+### 6.7 缩进用读回校正
 
-**唯一可靠的做法**：**读回实测 + 精确校正**
+编辑器自动缩进不公开。做法是每行输入后读回实际内容：
 
-```
-每一行：换行 → 读回编辑器实际缩进 → 和目标对比
-        ├─ 相同 → 不动
-        └─ 不同 → 按格数精确补/删
-```
+1. 从 JS 读编辑器原文。
+2. 取当前行的前导空白，算格数。
+3. 和目标对比。
+4. 少了补 Tab，多了删空格。
 
-**读取实现**（JS 侧，多引擎探测）：
+读编辑器要覆盖多种引擎：
 
 ```js
 function editorText(){
   var cm = document.querySelector('.CodeMirror');
-  if (cm && cm.CodeMirror) return cm.CodeMirror.getValue();       // CodeMirror 5
-  if (window.monaco) return window.monaco.editor.getModels()[0].getValue();  // Monaco
+  if (cm && cm.CodeMirror) return cm.CodeMirror.getValue();
+  if (window.monaco) return window.monaco.editor.getModels()[0].getValue();
   var ta = document.querySelector('textarea');
-  if (ta) return ta.value;                                        // 原生 textarea
+  if (ta) return ta.value;
   var ce = document.querySelector('[contenteditable="true"]');
-  if (ce) return ce.innerText;                                    // contenteditable
+  if (ce) return ce.innerText;
   return '';
 }
 ```
 
-> ⚠️ 注意：读页面文本的函数里常有 `replace(/[ \t]+/g,' ')` 这类"压缩空白"的处理，**会把缩进全压掉**。编辑器原文必须**单独读取、原样返回**。
+读页面文本的函数常带 `replace(/[ \t]+/g,' ')`。编辑器原文要单独读，原样返回。
 
-### 6.8 `pkill -f` 会误杀无辜进程
+### 6.8 清理进程用 PID 文件
 
-**现象**：清理 relay 时执行 `pkill -f "python3 relay.py"`，**把调用它的 shell 也杀了**（因为命令行里含该字符串）。
-
-**修复**：用 PID 文件精确杀：
+`pkill -f` 匹配完整命令行，会误杀调用方。启动时写 PID，清理时按 PID kill：
 
 ```python
-# relay.py 启动时
 open("/tmp/relay.pid", "w").write(str(os.getpid()))
-
-# 清理时
-pid = int(open("/tmp/relay.pid").read())
-os.kill(pid, signal.SIGTERM)
+# 清理
+os.kill(int(open("/tmp/relay.pid").read()), signal.SIGTERM)
 ```
 
-**教训**：`pkill -f` 匹配完整命令行，**永远有误杀风险**。
+### 6.9 重签名后重置 TCC 授权
 
-### 6.9 签名改动会导致 TCC 授权失效
-
-**现象**：每次重新编译签名浮窗，之前授予的"辅助功能"权限就失效，输入被系统丢弃。
-
-**原因**：macOS 的 TCC 授权**绑定签名 CDHash**，重签名 = 新程序。
-
-**应对**：
+TCC 授权绑定 CDHash。重签名后授权失效，用 tccutil 重置：
 
 ```bash
-# 重置授权记录，强制系统重新询问
 tccutil reset Accessibility <bundle-id>
 tccutil reset ListenEvent <bundle-id>
 ```
 
-**或**：调完代码后**冻结版本**，只授权一次。
+### 6.10 权限检查只作提示
 
-### 6.10 `AXIsProcessTrusted()` 在部分系统上不可靠
-
-**现象**：返回 `false`，但按键实际能发出去。
-
-**教训**：**不要用它做硬性拦截**，只作为提示；实际以"输入是否生效"为准。
-
----
+`AXIsProcessTrusted()` 在部分系统上返回 false，但按键实际可用。用它决定是否弹授权提示，不要做硬性拦截。
 
 ## 7. 防护建议与优先级
 
@@ -1055,10 +896,7 @@ tccutil reset ListenEvent <bundle-id>
 | **P2** | 焦点检测改为窗口级交叉验证 | 用 CGWindowList 判断前台窗口 |
 | **P3** | 指纹/虚拟化多维化 | 提升伪造成本 |
 
-**另外，有两处设计值得肯定**：
-
-1. **请求签名机制（`bodyHashHex`）** —— `body → SHA256 → bodyHashHex → 设备私钥签名`，服务端重算比对。**有效阻止了请求体篡改**，这是整个系统中最扎实的设计。
-2. **客户端不承载业务逻辑** —— 题目/评分/行为分析全在服务端，客户端被逆向也拿不到评测逻辑。
+**补充限制**：请求签名绑定请求体哈希（`bodyHashHex`），修改 body 会被服务端识破。因此绕过范围只能停在本地检测层。
 
 ---
 

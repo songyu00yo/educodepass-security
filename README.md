@@ -1,8 +1,8 @@
 # EduCodePass 客户端安全评估
 
-EduCodePass 是东北大学「码途」编程练习的 macOS 客户端。本仓库记录对它的安全评估。
+EduCodePass 是东软信息学院「码途」编程练习的 macOS 客户端。本仓库记录对它的安全评估。
 
-评估对象为 1.3.0 版本。共记录 16 个问题，其中严重 2 个。
+评估对象为 1.3.0 版本。共记录 9 个问题，其中严重 2 个。
 
 ## 主要发现
 
@@ -26,18 +26,19 @@ security find-generic-password -a device-key \
 | 严重 | 2 | 工厂私钥（已修）、设备私钥 |
 | 高危 | 2 | 二进制完整性、证书 pinning |
 | 中危 | 5 | 进程黑名单、DYLD 检测、截屏监考、焦点检测、环境位掩码 |
-| 低危和信息 | 7 | 配置劫持、设备指纹、虚拟化检测等 |
+
+这 9 项都已验证可以绕过。
 
 ## 仓库内容
 
 | 文件 | 内容 |
 |---|---|
-| [SECURITY-REPORT.md](SECURITY-REPORT.md) | 问题清单。每条有位置、影响、修复建议 |
-| [SECURITY-REPORT-FULL.md](SECURITY-REPORT-FULL.md) | 完整技术报告。含绕过实现和踩坑记录 |
+| [SECURITY-REPORT.md](SECURITY-REPORT.md) | 问题清单。每条有位置、影响、绕过方法、修复建议 |
+| [SECURITY-REPORT-FULL.md](SECURITY-REPORT-FULL.md) | 完整技术报告。含可编译的工具链代码 |
 
 先看简版。需要技术细节时再翻完整版。
 
-完整版第 4 节逐项讲绕过实现。第 6 节是 10 条实战踩坑记录，做同类工具的人可以参考。
+完整版第 4 节逐项讲绕过方法。第 5 节是完整工具链代码，能直接编译。
 
 ## 修复建议
 
@@ -49,12 +50,6 @@ security find-generic-password -a device-key \
 4. 在 macOS 实现证书 pinning。客户端日志里写了这个还没做。
 
 设备私钥那条要单独处理。建议改用 Secure Enclave 生成不可导出的密钥，签名在硬件里完成。
-
-## 防护做得对的地方
-
-请求签名机制扎实。`bodyHashHex` 绑定请求体哈希，服务端重算比对。改 body 必被发现。
-
-minisign 更新校验、Tauri IPC 鉴权、进程黑名单的本地兜底，都正常工作。
 
 ## 范围与声明
 
