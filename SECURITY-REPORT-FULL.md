@@ -4,16 +4,19 @@
 
 ## 阅读说明
 
-本文补充技术细节，评估对象为 macOS 客户端 1.3.0。[样本与测试环境](SECURITY-REPORT.md#评估信息)见安全报告。
+本文补充技术细节，评估对象为 macOS 客户端 **1.3.2**；1.3.0 的验证记录保留在第 4～6 节作为对照基线。[样本与测试环境](SECURITY-REPORT.md#评估信息)见安全报告。
 
-共记录 8 项安全发现，其中 V-06 和 V-07 尚待运行时验证。历史问题 V-01 见[简版报告](SECURITY-REPORT.md#3-历史问题)。严重程度沿用原报告评级。
+共记录 14 项安全发现：8 项为 1.3.0 基线复核，6 项为 1.3.2 新增。其中 V-06 尚待运行时验证。历史问题 V-01 见[简版报告](SECURITY-REPORT.md#3-历史问题)。严重程度沿用原报告评级。
 
 | 发现 | 验证状态 | 主要边界 |
 | --- | --- | --- |
 | V-02、V-04、V-05、V-08 | 报告记录了动态观察 | 仅覆盖所述测试路径 |
-| V-13 | 读取和格式解析实测 | 服务端操作权限未验证 |
+| V-13 | 读取和格式解析实测（1.3.0）；1.3.2 仅静态确认实现方式 | 服务端操作权限未验证 |
 | V-16 | 部分命令成功返回，敏感命令返回参数错误 | 敏感命令执行效果未验证 |
-| V-06、V-07 | 静态推断 | 内存改写和截图隐藏成功率未验证 |
+| V-17 | 签名返回值实测 | 服务端校验强度未验证，未提交任何签名请求 |
+| V-18、V-19 | 返回内容实测 | 完整字段与缓存信任策略未确认 |
+| V-21 | 包内/包外对照实测 | 判据边界与是否上报未验证 |
+| V-06、V-07、V-22 | 静态推断 | 内存改写、截图隐藏成功率、自检阈值均未验证 |
 
 第 5 节保留原有验证代码；第 6 节保留实现记录。仓库未附独立编译与运行验收记录，文档整理未验证这些代码。下文的本地观察不代表服务端的最终判定。
 
@@ -25,7 +28,8 @@
 4. [逐项验证记录](#4-逐项验证记录)
 5. [验证代码](#5-验证代码)
 6. [实现要点](#6-实现要点)
-7. [披露声明](#7-披露声明)
+7. [1.3.2 复核记录](#7-132-复核记录)
+8. [披露声明](#8-披露声明)
 
 ## 术语说明
 
@@ -43,22 +47,24 @@
 | 项 | 值 |
 | --- | --- |
 | Bundle ID | `cn.edu.neusoft.codepass.client` |
-| 版本 | 1.3.0 |
+| 版本 | 1.3.2（对照基线 1.3.0） |
 | 架构 | 通用二进制（x86_64、arm64） |
 | 签名 | adhoc + hardened runtime（`flags=0x10002`），无 Team ID |
 | 技术栈 | Tauri v2 / Rust 后端 + 远程 Web 前端 |
 | 前端 | `https://codepass.neusoft.edu.cn/` |
 | 接入 | 深信服 aTrust 零信任 VPN + 企业微信扫码 |
-| 主二进制 | `educodepass`（13,999,632 字节） |
+| 主二进制 | `educodepass`（1.3.2 为 14,049,600 字节；1.3.0 为 13,999,632） |
 
 架构特点：客户端壳不承载业务逻辑。题目、评测、评分、行为分析都在远程前端和服务端。壳只做四件事：请求签名、设备指纹、环境检测、反作弊上报。
 
 通用二进制的架构切片文件偏移：
 
-| 架构 | 文件偏移 |
-| --- | --- |
-| x86_64 | `0x4000` |
-| arm64 | `0x6d8000` |
+| 架构 | 1.3.0 | 1.3.2 |
+| --- | --- | --- |
+| x86_64 | `0x4000` | `0x4000` |
+| arm64 | `0x6d8000` | `0x6e0000` |
+
+注意：1.3.2 的 arm64 切片起点与 1.3.0 不同，且**每次 codesign 重签名后内部偏移都会漂移**。定位字符串应使用字节模式搜索，不要硬编码偏移。
 
 ## 2. 威胁模型
 
@@ -293,7 +299,7 @@ security find-generic-password -a device-key \
 
 ```
 -----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEZQredXRgD1f0iNsCBFe0No9y...   ← 已截断
+<DEVICE_PUBKEY_PEM 前 32 基址字符…>   ← 已截断
 -----END PUBLIC KEY-----
 ```
 
@@ -944,10 +950,110 @@ tccutil reset ListenEvent <bundle-id>
 
 原记录称权限检查返回 `false` 时仍观察到按键输入，但未列出对应系统版本与完整条件。权限判断与输入结果应分别记录，不能据此制定通用处理规则。
 
-## 7. 披露声明
+## 7. 1.3.2 复核记录
+
+本节记录 1.3.2 相对 1.3.0 的复核过程。所有命令与输出均为本机实测，输出中涉及的设备标识已说明为测试环境产物。
+
+### 7.1 复核方式
+
+| 项 | 做法 |
+| --- | --- |
+| 版本确认 | `/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" .../Info.plist` → `1.3.2`；二进制 14,049,600 字节 |
+| 二进制差异 | `lipo -thin` 拆分两架构，`strings -a -n 8` 取集合并求差；中文串单独求差 |
+| 前端获取 | `GET https://codepass.neusoft.edu.cn/` → 入口 HTML → 从主 bundle 提取全部 `assets/*.js` 清单（49 个懒加载 chunk + 3 个主 bundle），全部下载后按关键字定位 |
+| IPC 探测 | 注入自定义 dylib，在 webview 上下文调用 `window.__TAURI__.core.invoke`，把结果经 `WKScriptMessageHandler` 回传落盘 |
+| 镜像检测验证 | 自编译「追加式」shim，让进程同时加载两个库，对比是否告警 |
+
+### 7.2 ACL 探测的判定方法
+
+Tauri v2 的命令调用有两层前置检查：ACL 权限、参数反序列化。二者返回的错误串不同，可据此区分：
+
+- ACL 拒绝：`Command <name> not allowed by ACL`
+- 参数缺失：`invalid args <field> for command <name>: command <name> missing required key <field>`
+
+因此**只传空对象 `{}`** 即可判断权限是否放行：返回 `invalid args` 说明已过 ACL。这是在不改变任何服务端状态的前提下取得权限信息的方法。
+
+对敏感命令一律止步于此；`device_id_set`、`capture_shot`、`install_update`、`close_client_window` 未调用。
+
+实测结果见安全报告 V-16 表格。关键差异：`sign_request` 在 1.3.0 返回 ACL 拒绝，在 1.3.2 返回 `invalid args 'method'`。
+
+### 7.3 参数补齐还原签名入参
+
+Rust serde 按字段声明顺序报出第一个缺失项，逐个补齐即可还原完整结构：
+
+| 轮次 | 返回 | 推断出的字段 |
+| --- | --- | --- |
+| 1 | `missing required key method` | `method` |
+| 2 | `missing required key path` | `path` |
+| 3 | `missing required key body` | `body` |
+| 4 | `invalid type: integer, expected a string`（timestamp） | `timestamp` 为字符串 |
+| 5 | 成功 | 完整入参 `{method, path, body, nonce, timestamp, deviceId}` |
+
+最终返回：
+
+```json
+{"signature":"MEUCIGQfRBnGDjU1IAORZLn9oT9bByex3…<已截断>…L4PIcw=","alg":"ecdsa-p256"}
+```
+
+同一方法用于 `sign_endorsement`（还需 `bodyHashHex`、`publicKeyHashHex`）与 `sign_env_attestation`（需 `timestamp` + `nonce`，且对二者格式有额外校验，未通过）。
+
+### 7.4 已加载镜像检测的验证
+
+1.3.2 新增告警串 `<[env] 检测到非系统 / 非应用包的已加载镜像：{}`，1.3.0 中不存在。
+
+验证步骤与两个关键坑：
+
+| 步骤 | 结果 |
+| --- | --- |
+| 用 `launchctl setenv DYLD_INSERT_LIBRARIES /tmp/probe-x.dylib` 再 `open` 启动 | **无效**——`shim.c` 中 `setenv(..., 1)` 会覆盖该变量，探针库未加载（`vmmap` 中无该库） |
+| 自编译「追加式」shim：把既有值与包内 dylib 用冒号拼接 | 探针库成功加载 |
+| 同时加载 `Contents/Frameworks/anti-detect.dylib` 与 `/private/tmp/probe-x.dylib` | 输出 `[env] 检测到非系统 / 非应用包的已加载镜像：/private/tmp/probe-x.dylib` |
+| 只加载包内库 | 无任何告警（多次启动验证） |
+
+结论：判据为镜像**路径前缀**，不是签名或 CDHash。1.3.2 因此只提高了注入门槛，未阻止注入。
+
+另注：`_dyld_image_count`、`_dyld_get_image_name`、`_dyld_get_image_header`、`_dyld_get_image_vmaddr_slide` 四个符号在 **1.3.0 中同样存在**（Rust 标准库 backtrace 依赖），因此「符号存在」不能作为「存在该检测」的证据，必须结合告警串与代码路径判断。
+
+### 7.5 必须排除的假信号
+
+用 `nohup ./Contents/MacOS/educodepass &` 直接启动二进制（不经 LaunchServices）时，客户端窗口无法建立（CPU 0%、无页面渲染），并在 10–60 秒内打印：
+
+```
+[client] 已提示被限制的程序，按约定退出客户端
+```
+
+这与版本、二进制修改、运行环境均无关，纯属启动方式导致的假阳性。若据此判断「检测加强」会得出错误结论。
+
+正确方式：
+
+```bash
+open -a "$PWD/EduCodePass-clean.app" --stdout /tmp/o.log --stderr /tmp/e.log
+```
+
+同样，运行会触发 TCC 权限弹窗或抢占焦点的诊断工具（例如临时编译的窗口枚举程序）也可能间接干扰客户端。做稳定性对照时应保持环境静默。
+
+### 7.6 配置下发的两个负向结论
+
+| 假设 | 实测 | 结论 |
+| --- | --- | --- |
+| 改本地 `config.json` 可清空进程黑名单 | 清空后重启，文件被服务端重新下发覆盖回 64 条；`update.log` 记录「应用服务端下发的进程名单：64 条」 | 无效 |
+| `/api/client/config` 需要鉴权 | 不带任何凭证 `GET` 返回 `HTTP 200`、761 字节 | 不需要；内容公开 |
+
+### 7.7 前端侧复核要点
+
+前端 52 个 chunk 全量检索后的主要结论：
+
+- 行为指标上报字段为 **10 个**（基线记录为 7 个），全部由页面 JS 计算。
+- `inputIntervalCv` 的实现为「最近 500 个按键间隔的变异系数」，样本少于 5 个时返回 `null`。
+- `bulkInsertCount` 阈值为单次插入 > 8 字符；`orphanInputCount` 阈值为 input 距上次 keydown > 300ms。
+- devtools 探测为四重（引用替换、getter 陷阱、`debugger` 计时、页面隐藏时长），命中后**阻断提交**。
+- 鉴权相关的 `requireSignature` 只对浏览器渠道生效；客户端内该标记被跳过。
+- 未发现硬编码密钥、Token、内部域名；未发现浏览器环境指纹采集（屏幕、时区、字体、WebGL、音频、canvas）。
+
+## 8. 披露声明
 
 - 本报告用于授权范围内的安全评估。
 - 所有验证在本地测试环境完成，未对生产服务端发起攻击。
 - 文中已脱敏：用户名、设备登记码、API 密钥、个人标识均已移除。
 
-原报告日期：2026-10-16。文档整理日期：2026-10-20。
+原报告日期：2026-10-16。文档整理日期：2026-10-20。1.3.2 复核日期：2026-10-23。
